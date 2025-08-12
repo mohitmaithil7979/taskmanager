@@ -209,4 +209,23 @@
   } else {
     scan();
   }
+
+  // Respond to messages from the popup for scanning
+  try {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!message || typeof message !== 'object') return;
+      if (message.type === 'mxdl_scan') {
+        const videos = Array.from(document.querySelectorAll('video'));
+        const results = videos.map((v) => ({
+          currentSrc: v.currentSrc || v.src || '',
+          isPaused: !!v.paused,
+          duration: Number.isFinite(v.duration) ? v.duration : null
+        }));
+        sendResponse({ ok: true, count: videos.length, results });
+        return true;
+      }
+    });
+  } catch (_) {
+    // ignore
+  }
 })();

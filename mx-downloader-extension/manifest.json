@@ -18,6 +18,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Open Video Downloader"
+    "default_title": "Open Video Downloader",
+    "default_popup": "popup.html"
   }
 }
