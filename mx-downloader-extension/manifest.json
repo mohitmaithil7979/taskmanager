@@ -1,0 +1,23 @@
+{
+  "name": "Open Video Downloader (Non-DRM)",
+  "description": "Adds a button to download open HTML5 videos you have rights to. Does not bypass DRM.",
+  "version": "1.0.0",
+  "manifest_version": 3,
+  "permissions": ["downloads", "scripting", "activeTab", "storage"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "exclude_matches": ["https://chrome.google.com/*"],
+      "js": ["contentScript.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open Video Downloader"
+  }
+}
