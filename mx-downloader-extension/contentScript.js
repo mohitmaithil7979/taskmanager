@@ -31,6 +31,17 @@
     return 'mp4';
   }
 
+  function isStreamingUrl(url) {
+    if (!url) return false;
+    const u = url.split('?')[0].toLowerCase();
+    return (
+      u.endsWith('.m3u8') ||
+      u.endsWith('.mpd') ||
+      u.includes('/dash/') ||
+      u.includes('/hls/')
+    );
+  }
+
   function generateFilename(base, ext) {
     const host = location.hostname.replace(/^www\./, '');
     const title = toKebabCase(document.title);
@@ -73,7 +84,6 @@
     const filename = generateFilename(suggestedBaseName, ext);
     const url = URL.createObjectURL(blob);
     try {
-      // Prefer native download via a[download] to ensure blob URLs are accessible
       const a = document.createElement('a');
       a.href = url;
       a.download = filename;
@@ -86,18 +96,38 @@
     }
   }
 
+  function waitForEvent(target, event, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const onEvent = () => { cleanup(); resolve(); };
+      const onTimeout = () => { cleanup(); reject(new Error('timeout')); };
+      let to;
+      function cleanup() {
+        target.removeEventListener(event, onEvent);
+        if (to) clearTimeout(to);
+      }
+      target.addEventListener(event, onEvent, { once: true });
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        to = setTimeout(onTimeout, timeoutMs);
+      }
+    });
+  }
+
   async function captureAndDownload(video) {
     if (!video || typeof video.captureStream !== 'function') {
       alert('This video cannot be captured. It may be protected or the browser blocked capture.');
       return;
     }
 
-    // If the video is a live stream or has no duration, capturing to end is not feasible
-    if (!Number.isFinite(video.duration) || video.duration === Infinity) {
-      alert('Live streams are not supported for capture.');
+    if (video.readyState < 1) {
+      try { await waitForEvent(video, 'loadedmetadata', 8000); } catch (_) {}
+    }
+
+    if (!Number.isFinite(video.duration) || video.duration === Infinity || video.duration <= 0) {
+      alert('Live streams or unknown durations are not supported for capture.');
       return;
     }
 
+    const targetDuration = video.duration;
     const stream = video.captureStream();
     const mimeType = pickSupportedMime();
 
@@ -105,8 +135,11 @@
     try {
       recorder = new MediaRecorder(stream, { mimeType });
     } catch (e) {
-      console.warn('MediaRecorder init failed, trying without explicit mimeType', e);
-      recorder = new MediaRecorder(stream);
+      try { recorder = new MediaRecorder(stream); } catch (e2) {
+        console.error('MediaRecorder init failed', e, e2);
+        alert('Recording is not supported on this page.');
+        return;
+      }
     }
 
     const chunks = [];
@@ -118,26 +151,57 @@
       recorder.addEventListener('stop', resolve, { once: true });
     });
 
-    // Prepare playback for capture
     const wasPaused = video.paused;
     const prevMuted = video.muted;
     const prevRate = video.playbackRate;
+
+    const progressWatcher = { intervalId: null };
+
+    function startProgressWatcher() {
+      progressWatcher.intervalId = setInterval(() => {
+        if (video.paused) {
+          video.play().catch(() => {});
+        }
+      }, 2000);
+    }
+
+    function stopProgressWatcher() {
+      if (progressWatcher.intervalId) clearInterval(progressWatcher.intervalId);
+    }
+
     try {
       video.muted = true;
       video.playbackRate = 1.0;
-      if (!wasPaused) {
-        // restart from current position
-      } else if (Number.isFinite(video.duration) && video.duration > 1) {
-        try { video.currentTime = 0; } catch (_) {}
-      }
+      try { video.currentTime = 0; } catch (_) {}
+
       recorder.start(1000);
-      await video.play();
+      await video.play().catch(() => {});
+      startProgressWatcher();
 
-      const onEnded = () => {
-        try { recorder.stop(); } catch (_) {}
-      };
-      video.addEventListener('ended', onEnded, { once: true });
+      const reachedEnd = new Promise((resolve) => {
+        const onTimeUpdate = () => {
+          if (Number.isFinite(video.duration) && video.currentTime >= video.duration - 0.25) {
+            cleanup();
+            resolve();
+          }
+        };
+        const onEnded = () => { cleanup(); resolve(); };
+        function cleanup() {
+          video.removeEventListener('timeupdate', onTimeUpdate);
+          video.removeEventListener('ended', onEnded);
+        }
+        video.addEventListener('timeupdate', onTimeUpdate);
+        video.addEventListener('ended', onEnded, { once: true });
+      });
 
+      // Wait up to duration + small buffer (in ms)
+      const maxWait = Math.min(Math.max(targetDuration * 1000 + 3000, 10_000), 6 * 60 * 60 * 1000);
+      await Promise.race([
+        reachedEnd,
+        new Promise((resolve) => setTimeout(resolve, maxWait))
+      ]);
+
+      try { recorder.stop(); } catch (_) {}
       await stopped;
 
       const blob = new Blob(chunks, { type: recorder.mimeType || mimeType });
@@ -146,6 +210,7 @@
       console.error('Capture failed:', err);
       alert('Capture failed. The video may be protected (DRM) or blocked by browser security.');
     } finally {
+      stopProgressWatcher();
       try { video.muted = prevMuted; } catch (_) {}
       try { video.playbackRate = prevRate; } catch (_) {}
       if (wasPaused) {
@@ -167,7 +232,6 @@
 
     container.appendChild(button);
 
-    // Ensure positioning context exists
     const parent = video.parentElement;
     if (!parent) return;
     const computed = window.getComputedStyle(parent);
@@ -181,12 +245,11 @@
       ev.stopPropagation();
 
       const directUrl = video.currentSrc || video.src || '';
-      if (/^https?:\/\//i.test(directUrl)) {
+      if (/^https?:\/\//i.test(directUrl) && !isStreamingUrl(directUrl)) {
         await downloadDirect(directUrl);
         return;
       }
 
-      // Try to capture when source is MSE blob or similar (non-DRM)
       await captureAndDownload(video);
     });
   }
@@ -196,21 +259,18 @@
     videos.forEach(attachButton);
   }
 
-  // Observe DOM changes to catch dynamically added videos
   const observer = new MutationObserver(() => scan());
   observer.observe(document.documentElement || document.body, {
     childList: true,
     subtree: true
   });
 
-  // Initial scan
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', scan, { once: true });
   } else {
     scan();
   }
 
-  // Respond to messages from the popup for scanning
   try {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!message || typeof message !== 'object') return;
