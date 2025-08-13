@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Color Changer Demo",
+  "version": "1.0.0",
+  "description": "Quick demo extension: change the current page background color.",
+  "action": {
+    "default_title": "Color Changer",
+    "default_popup": "popup.html"
+  },
+  "permissions": ["scripting", "activeTab", "tabs"]
+}
